@@ -1,0 +1,40 @@
+<template>
+	<lightning-card title="Sentiment Analysis" icon-name="utility:temperature">
+		<!-- Loading / analyzing spinner -->
+		<template if:false={loaded}>
+			<div class="slds-is-relative slds-p-around_medium">
+				<lightning-spinner size="small" alternative-text="Analyzing"></lightning-spinner>
+			</div>
+		</template>
+
+		<!-- Content once loaded -->
+		<template if:true={loaded}>
+			<div class="slds-p-around_small" aria-live="polite">
+				<!-- <template if:true={showCalculateButton}>
+					<lightning-button variant="brand" label="Calculate Emotion" class="slds-m-bottom_small"
+						onclick={handleManualCalculate} disabled={_analyzing}></lightning-button>
+				</template> -->
+				<!-- Result shown -->
+				<template if:true={hasResult}>
+					<span class={badgeClass} title={emotion}>
+						<lightning-icon icon-name={iconName} size="x-small" alternative-text={emotion} class="slds-m-right_x-small"></lightning-icon>
+						<span class="slds-truncate">{emotion}</span>
+					</span>
+					<template if:true={reason}>
+						<p class="slds-m-top_small slds-text-body_small">{reason}</p>
+					</template>
+				</template>
+
+				<!-- No result or error states -->
+				<template if:false={hasResult}>
+					<template if:true={error}>
+						<p class="slds-text-color_error slds-text-body_small">{error}</p>
+					</template>
+					<template if:false={error}>
+						<p class="slds-text-color_weak slds-text-body_small">No sentiment available.</p>
+					</template>
+				</template>
+			</div>
+		</template>
+	</lightning-card>
+</template>

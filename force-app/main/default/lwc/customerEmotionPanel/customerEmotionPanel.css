@@ -1,0 +1,17 @@
+.sentiment-badge {
+    display: inline-flex;
+    align-items: center;
+    text-transform: lowercase;
+}
+.sentiment-positive {
+    background: #2e844a; /* success green token approximation */
+    color: #fff;
+}
+.sentiment-negative {
+    background: #ba0517; /* error red */
+    color: #fff;
+}
+.sentiment-neutral {
+    background: #706e6b; /* gray */
+    color: #fff;
+}
