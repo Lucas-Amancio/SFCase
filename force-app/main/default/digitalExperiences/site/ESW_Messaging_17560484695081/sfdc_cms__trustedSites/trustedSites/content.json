@@ -1,0 +1,12 @@
+{
+  "type" : "sfdc_cms__trustedSites",
+  "title" : "trustedSites",
+  "contentBody" : {
+    "trustedSites" : [ {
+      "isActive" : true,
+      "source" : "https://orgfarm-8f9b0f7f11-dev-ed.develop.my.salesforce-scrt.com",
+      "sourceName" : "Messaging for Web host"
+    } ]
+  },
+  "urlName" : "trustedsites"
+}
