@@ -1,39 +1,104 @@
-import analyze from '@salesforce/apex/CustomerEmotionController.analyze';
+import analyzeAndPersist from '@salesforce/apex/CustomerEmotionController.analyzeAndPersist';
 import { subscribe, APPLICATION_SCOPE, MessageContext } from 'lightning/messageService';
+import getPanelConfig from '@salesforce/apex/CustomerEmotionController.getPanelConfig';
 import ConversationEndUserChannel from '@salesforce/messageChannel/lightning__conversationEndUserMessage';
 import ConversationEndedChannel from '@salesforce/messageChannel/lightning__conversationEnded';
 import { LightningElement, api, wire } from 'lwc';
+import { getRecord, getFieldValue } from 'lightning/uiRecordApi';
+
+const LAST_EMOTION_FIELD = 'MessagingSession.LastEmotion__c';
+const LAST_EMOTION_REASON_FIELD = 'MessagingSession.LastEmotionReason__c';
 
 
 export default class CustomerEmotionPanel extends LightningElement {
     @api recordId;
-
+    
     emotion;
     reason;
     error;
-    loaded = false;              // true when UI ready (after analysis or no data)
+    loaded = false;             
     receivingSubscription;      // subscription for end-user messages
     endedSubscription;          // subscription for conversation end events
     messages;
     conversationEnded = false;
     _analyzing = false;          // in-flight flag
-
+    
     @wire(MessageContext) messageContext;
-
+    
     _subscribeAttempts = 0;
     _subscribedLogged = false;
+    _configLoaded = false;
+    config = { calculateEveryMessage: false, calculateOnSessionEnd: false, showCalculateButton: false };
+    
+    _toolkitReady = false;
+    _initialConversationFetched = false;
+    _fetchAttempts = 0;
+    MAX_FETCH_ATTEMPTS = 5;
+
+    @wire(getPanelConfig) wiredConfig({ data, error }) {
+        if (data) {
+            this.config = {
+                calculateEveryMessage: !!data.calculateEveryMessage,
+                calculateOnSessionEnd: !!data.calculateOnSessionEnd,
+                showCalculateButton: !!data.showCalculateButton
+            };
+            this._configLoaded = true;
+
+            if (this.messages && this.config.calculateEveryMessage && !this._analyzing && !this.hasResult) {
+                this.runAnalysis();
+            }
+        } else if (error) {
+            console.warn('[EmotionPanel] Config wire error', error?.body?.message || error.message);
+            this._configLoaded = true;
+        }
+    }
+
+    @wire(getRecord, { recordId: '$recordId', fields: [LAST_EMOTION_FIELD, LAST_EMOTION_REASON_FIELD] })
+    wiredSession(resp) {
+        const { error, data } = resp;
+        if (data) {
+            if (!this.emotion) {
+                const persistedEmotion = getFieldValue(data, LAST_EMOTION_FIELD);
+                const persistedReason = getFieldValue(data, LAST_EMOTION_REASON_FIELD);
+                if (persistedEmotion) {
+                    this.emotion = String(persistedEmotion).toLowerCase();
+                    this.reason = persistedReason;
+                    this.loaded = true;
+                    console.log('[EmotionPanel] Seeded from persisted fields');
+                }
+            }
+        } else if (error) {
+            console.warn('[EmotionPanel] Could not load persisted emotion', error?.body?.message || error.message);
+        }
+    }
 
     connectedCallback() {
         console.log('[EmotionPanel] connectedCallback');
         this.trySubscribe();
-        this.loaded = true; // placeholder until first message
+        this.loaded = true; 
     }
 
+    get toolkit() {
+        return this.refs?.lwcToolKitApi;
+    }
+    
     renderedCallback() {
-        // In case wire becomes available only after first render, retry
-        if (!this.receivingSubscription) {
-            this.trySubscribe();
+        if (!this._toolkitReady && this.toolkit && this.recordId) {
+            this._toolkitReady = true;
+            this.tryInitialFetch();
         }
+    }
+
+    tryInitialFetch() {
+        this.fetchFullConversation().then(got => {
+            if (got) {
+                this._initialConversationFetched = true;
+            } else if (this._fetchAttempts < this.MAX_FETCH_ATTEMPTS) {
+                this._fetchAttempts++;
+                // retry with small backoff (e.g., 300ms * attempt number)
+                setTimeout(() => this.tryInitialFetch(), 300 * this._fetchAttempts);
+            }
+        });
     }
 
     trySubscribe() {
@@ -64,45 +129,39 @@ export default class CustomerEmotionPanel extends LightningElement {
 
     async handleMessageReceived(message) {
         console.log('[EmotionPanel] Inbound conversation message payload raw:', message);
-        // Attempt to extract a plain text field. Adjust depending on actual payload structure.
-        let extracted;
-        // Common shapes to probe
-        extracted = extracted || message?.content?.messageText; // some conversation payloads
-        extracted = extracted || message?.content?.text;        // alternative key
-        extracted = extracted || message?.content;              // raw content primitive
-        extracted = extracted || message?.messageText;          // direct field
-        // Fallback: stringify minimal subset
-        if (!extracted && message?.content) {
-            extracted = JSON.stringify(message.content);
+        
+        this.messages = JSON.stringify(message?.content);
+        
+        if (this.messages) {
+            await this.runAnalysis({ context: 'message' });
         }
-        if (!extracted) return; // nothing usable
-        this.messages = String(extracted).trim();
-        await this.runAnalysis();
     }
 
     async handleConversationEnded(payload) {
         console.log('[EmotionPanel] Conversation ended payload:', payload);
         this.conversationEnded = true;
-        await this.runAnalysis();
+        
+        await this.fetchFullConversation();
+        if (!this.hasResult && this.messages) {
+            await this.runAnalysis({ context: 'end' });
+        }
     }
 
-    // Helper for manual testing: call from console after selecting component DOM: cmp.simulateMessage('hello world')
-    @api async simulateMessage(text) {
-        return await this.handleMessageReceived({ content: text });
-    }
-
-    /**
-     * Performs analysis of current this.messages.
-     * Returns a result object { emotion, reason, raw } or null if nothing to analyze.
-     */
-    async runAnalysis() {
-        const text = (this.messages || '').trim();
+    async runAnalysis({ force = false, context = 'manual', overrideText } = {}) {
+        const text = (overrideText || this.messages || '').trim();
         if (!text) {
             this.loaded = true;
             return null;
         }
+        if (!force) {
+            if (context === 'message' && !this.config.calculateEveryMessage) {
+                return null;
+            }
+            if (context === 'end' && !this.config.calculateOnSessionEnd) {
+                return null;
+            }
+        }
         if (this._analyzing) {
-            // Avoid overlapping calls; let the in-flight one finish.
             return null;
         }
         this._analyzing = true;
@@ -110,17 +169,20 @@ export default class CustomerEmotionPanel extends LightningElement {
         this.error = null;
         console.log('[EmotionPanel] Analyzing text:', text);
         let result = null;
+
         try {
-            let resp = await analyze({ text });
+            let resp = await analyzeAndPersist({ sessionId: this.recordId, text });
             if (typeof resp === 'string') {
-                try { resp = JSON.parse(resp); } catch (_) { /* ignore */ }
+                resp = JSON.parse(resp);
             }
             this.emotion = (resp?.emotion || '').toLowerCase();
             this.reason = resp?.reason;
             result = { emotion: this.emotion, reason: this.reason, raw: resp?.raw || resp };
             console.log('[EmotionPanel] Analysis result:', result);
+
         } catch (e) {
             this.error = e?.body?.message || e.message || 'Error analyzing sentiment';
+
         } finally {
             this.loaded = true;
             this._analyzing = false;
@@ -129,24 +191,27 @@ export default class CustomerEmotionPanel extends LightningElement {
     }
 
     async handleManualCalculate() {
-        // If no current text, prompt user (could extend to open modal etc.)
         if (!this.messages) {
             this.error = 'No message text to analyze yet.';
             return;
         }
-        await this.runAnalysis();
+        await this.runAnalysis({ force: true, context: 'manual' });
     }
 
-    // Removed loadConfig & dynamic button visibility
-    get showCalculateButton() { return true; }
+    get showCalculateButton() { return this.config.showCalculateButton; }
 
     get hasResult() { return !!this.emotion; }
+
+    get displayEmotion() {
+        if (!this.emotion) return '';
+        return this.emotion.charAt(0).toUpperCase() + this.emotion.slice(1);
+    }
     get iconName() {
         switch (this.emotion) {
-            case 'positive': return 'utility:smiley_and_people';
-            case 'negative': return 'utility:dislike';
-            case 'neutral': return 'utility:minus';
-            default: return 'utility:question';
+            case 'positive': return 'utility:emoji_good';
+            case 'negative': return 'utility:emoji_worst';
+            case 'neutral': return 'utility:emoji_above_average';
+            default: return 'utility:help';
         }
     }
     get badgeClass() {
@@ -156,6 +221,33 @@ export default class CustomerEmotionPanel extends LightningElement {
             case 'negative': return `${base} slds-theme_error`;
             case 'neutral': return `${base} slds-theme_info`;
             default: return base;
+        }
+    }
+    async fetchFullConversation() {
+        if (!this.toolkit || !this.recordId) return false;
+        
+        try {
+            let log = await this.toolkit.getConversationLog(this.recordId);
+            console.log(`[EmotionPanel] Fetched full raw `, JSON.stringify(log));
+            const raw = log?.messages || [];
+
+            if (!raw.length) return false;
+            
+            const messageLog = [];
+            raw.forEach(m => {
+                messageLog.push({
+                    content: m.content,
+                    author: m.name || 'Unknown'
+                });
+            });
+
+            this.messages = JSON.stringify(messageLog);
+            
+            await this.runAnalysis({ context: 'end' });
+            return true;
+        } catch (e) {
+            console.warn('[EmotionPanel] fetchFullConversation failed', e?.body?.message || e.message);
+            return false;
         }
     }
 }
